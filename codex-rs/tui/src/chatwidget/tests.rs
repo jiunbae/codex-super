@@ -295,6 +295,7 @@ fn make_chatwidget_manual() -> (
     tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
     tokio::sync::mpsc::UnboundedReceiver<Op>,
 ) {
+    crate::history_cell::set_test_finished_at(Some("2025-01-01 12:34".to_string()));
     let (tx_raw, rx) = unbounded_channel::<AppEvent>();
     let app_event_tx = AppEventSender::new(tx_raw);
     let (op_tx, op_rx) = unbounded_channel::<Op>();

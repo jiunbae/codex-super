@@ -22,6 +22,7 @@ use crate::wrapping::RtOptions;
 use crate::wrapping::word_wrap_line;
 use crate::wrapping::word_wrap_lines;
 use base64::Engine;
+use chrono::Local;
 use codex_common::format_env_display::format_env_display;
 use codex_core::config::Config;
 use codex_core::config::types::McpServerTransportConfig;
@@ -56,6 +57,11 @@ use std::time::Duration;
 use std::time::Instant;
 use tracing::error;
 use unicode_width::UnicodeWidthStr;
+
+#[cfg(test)]
+use std::sync::Mutex;
+#[cfg(test)]
+use std::sync::OnceLock;
 
 /// Represents an event to display in the conversation history. Returns its
 /// `Vec<Line<'static>>` representation to make it easier to display in a
@@ -1479,10 +1485,14 @@ pub(crate) fn new_reasoning_summary_block(
 #[derive(Debug)]
 pub struct FinalMessageSeparator {
     elapsed_seconds: Option<u64>,
+    finished_at: Option<String>,
 }
 impl FinalMessageSeparator {
     pub(crate) fn new(elapsed_seconds: Option<u64>) -> Self {
-        Self { elapsed_seconds }
+        Self {
+            elapsed_seconds,
+            finished_at: finished_at_display(),
+        }
     }
 }
 impl HistoryCell for FinalMessageSeparator {
@@ -1493,18 +1503,52 @@ impl HistoryCell for FinalMessageSeparator {
         if let Some(elapsed_seconds) = elapsed_seconds {
             let worked_for = format!("─ Worked for {elapsed_seconds} ─");
             let worked_for_width = worked_for.width();
+            let finished_at_suffix = self
+                .finished_at
+                .as_deref()
+                .map(|time| format!(" {time}"))
+                .unwrap_or_default();
+            let finished_at_width = finished_at_suffix.width();
+            let separator_width = usize::from(width)
+                .saturating_sub(worked_for_width.saturating_add(finished_at_width));
             vec![
-                Line::from_iter([
-                    worked_for,
-                    "─".repeat((width as usize).saturating_sub(worked_for_width)),
-                ])
-                .dim(),
+                Line::from_iter([worked_for, "─".repeat(separator_width), finished_at_suffix])
+                    .dim(),
             ]
         } else {
             vec![Line::from_iter(["─".repeat(width as usize).dim()])]
         }
     }
 }
+
+fn finished_at_display() -> Option<String> {
+    #[cfg(test)]
+    if let Some(override_time) = finished_at_override() {
+        return Some(override_time);
+    }
+
+    Some(Local::now().format("%Y-%m-%d %H:%M").to_string())
+}
+
+#[cfg(test)]
+pub(crate) fn set_test_finished_at(time: impl Into<Option<String>>) {
+    let lock = FINISHED_AT_OVERRIDE.get_or_init(|| Mutex::new(None)).lock();
+    if let Ok(mut guard) = lock {
+        *guard = time.into();
+    }
+}
+
+#[cfg(test)]
+fn finished_at_override() -> Option<String> {
+    FINISHED_AT_OVERRIDE
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone())
+}
+
+#[cfg(test)]
+static FINISHED_AT_OVERRIDE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 
 fn format_mcp_invocation<'a>(invocation: McpInvocation) -> Line<'a> {
     let args_str = invocation
@@ -1575,6 +1619,25 @@ mod tests {
 
     fn render_transcript(cell: &dyn HistoryCell) -> Vec<String> {
         render_lines(&cell.transcript_lines(u16::MAX))
+    }
+
+    #[test]
+    fn final_message_separator_appends_finished_at_time() {
+        set_test_finished_at(Some("2025-01-01 12:34".to_string()));
+        let lines = FinalMessageSeparator::new(Some(0)).display_lines(50);
+        set_test_finished_at(None);
+
+        assert_eq!(lines.len(), 1);
+        let rendered = render_lines(&lines);
+        let line = &rendered[0];
+        assert!(
+            line.contains("Worked for 0s"),
+            "line missing elapsed: {line}"
+        );
+        assert!(
+            line.ends_with("2025-01-01 12:34"),
+            "line missing finished time: {line}"
+        );
     }
 
     #[test]
